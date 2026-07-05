@@ -167,6 +167,9 @@ pub const K_RESULT_OK: i32 = kResultOk;
 /// Media type: audio.
 pub const K_AUDIO: i32 = MediaTypes_::kAudio as i32;
 
+/// Media type: event (MIDI).
+pub const K_EVENT: i32 = MediaTypes_::kEvent as i32;
+
 /// Bus direction: input.
 pub const K_INPUT: i32 = BusDirections_::kInput as i32;
 

@@ -71,6 +71,13 @@ fn main() -> anyhow::Result<()> {
             no_tone,
             list_params,
         )?,
+        Command::Render {
+            plugin,
+            notes,
+            out,
+            sample_rate,
+            tail,
+        } => app::commands::render(&plugin, &notes, &out, sample_rate, tail)?,
         Command::Devices => app::commands::devices()?,
         Command::MidiPorts => app::commands::midi_ports()?,
         Command::Gui {

@@ -192,6 +192,147 @@ pub fn midi_ports() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One note to render, parsed from the `render --notes` JSON file.
+#[derive(serde::Deserialize)]
+struct RenderNote {
+    pitch: u8,
+    #[serde(default = "default_velocity")]
+    velocity: u8,
+    start_time: f64,
+    duration: f64,
+}
+
+fn default_velocity() -> u8 {
+    100
+}
+
+/// Render a note list through an instrument plugin to a WAV file, offline.
+/// No audio device is opened; the engine is pulled block-by-block and MIDI
+/// note on/off events are injected at their sample positions.
+pub fn render(
+    plugin: &str,
+    notes_path: &Path,
+    out_path: &Path,
+    sample_rate: u32,
+    tail: f64,
+) -> anyhow::Result<()> {
+    let (module, class_name, cid) = resolve_plugin(plugin)?;
+    println!("Loading plugin: {}", class_name);
+
+    let mut instance = module.create_instance(&cid, &class_name)?;
+    if !instance.can_process_f32() {
+        anyhow::bail!(
+            "Plugin '{}' does not support 32-bit float processing",
+            class_name
+        );
+    }
+
+    let notes_json = std::fs::read_to_string(notes_path)?;
+    let mut notes: Vec<RenderNote> = serde_json::from_str(&notes_json)?;
+    if notes.is_empty() {
+        anyhow::bail!("Note list is empty");
+    }
+    notes.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
+
+    const BLOCK: usize = 512;
+    const CHANNELS: usize = 2;
+    let sr = sample_rate as f64;
+
+    instance.set_bus_arrangements(K_SPEAKER_STEREO, K_SPEAKER_STEREO)?;
+    instance.setup_processing(sr, BLOCK as i32)?;
+    instance.activate()?;
+    instance.start_processing()?;
+
+    let mut engine = AudioEngine::new(instance, sr, BLOCK, CHANNELS);
+    engine.tone().enabled = false;
+    engine.set_playing(true);
+
+    let receiver = Arc::new(crate::midi::device::MidiReceiver::new());
+    engine.set_midi_receiver(receiver.clone());
+
+    // Sample-indexed MIDI events: (sample, [status, data1, data2]).
+    let mut events: Vec<(usize, [u8; 3])> = Vec::with_capacity(notes.len() * 2);
+    for n in &notes {
+        let on = (n.start_time * sr) as usize;
+        let off = ((n.start_time + n.duration.max(0.01)) * sr) as usize;
+        events.push((on, [0x90, n.pitch, n.velocity.clamp(1, 127)]));
+        events.push((off.max(on + 1), [0x80, n.pitch, 0]));
+    }
+    events.sort_by_key(|e| e.0);
+
+    let total_secs = notes
+        .iter()
+        .map(|n| n.start_time + n.duration)
+        .fold(0.0, f64::max)
+        + tail.max(0.0);
+    let total_samples = (total_secs * sr).ceil() as usize;
+
+    let mut pcm: Vec<f32> = Vec::with_capacity(total_samples * CHANNELS);
+    let mut block = vec![0f32; BLOCK * CHANNELS];
+    let mut cursor = 0usize;
+    let mut next_event = 0usize;
+
+    while cursor < total_samples {
+        let frames = BLOCK.min(total_samples - cursor);
+        // Inject events that land inside this block.
+        while next_event < events.len() && events[next_event].0 < cursor + frames {
+            let (_, msg) = events[next_event];
+            receiver.push(0, &msg);
+            next_event += 1;
+        }
+        let out = &mut block[..frames * CHANNELS];
+        out.fill(0.0);
+        engine.process(out);
+        pcm.extend_from_slice(out);
+        cursor += frames;
+    }
+
+    engine.shutdown();
+
+    write_wav_16(out_path, &pcm, sample_rate, CHANNELS as u16)?;
+    println!(
+        "Rendered {} notes → {} ({:.1}s at {} Hz)",
+        notes.len(),
+        out_path.display(),
+        total_secs,
+        sample_rate
+    );
+    Ok(())
+}
+
+/// Minimal 16-bit PCM RIFF/WAVE writer for interleaved samples.
+fn write_wav_16(
+    path: &Path,
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+) -> anyhow::Result<()> {
+    let data_len = (samples.len() * 2) as u32;
+    let byte_rate = sample_rate * u32::from(channels) * 2;
+    let block_align = channels * 2;
+
+    let mut bytes: Vec<u8> = Vec::with_capacity(44 + samples.len() * 2);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 /// Load and run a plugin with real-time audio processing.
 pub fn run(
     plugin: &str,

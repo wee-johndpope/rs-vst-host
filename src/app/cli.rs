@@ -57,6 +57,29 @@ pub enum Command {
         #[arg(long)]
         list_params: bool,
     },
+    /// Render a note list through an instrument plugin to a WAV file
+    /// (offline, no audio device required).
+    Render {
+        /// Plugin name (as shown in `list`) or path to a .vst3 bundle.
+        plugin: String,
+
+        /// JSON note list: [{"pitch":64,"velocity":100,"start_time":0.0,"duration":0.5}, …]
+        /// Times are in seconds.
+        #[arg(short, long)]
+        notes: PathBuf,
+
+        /// Output WAV path (16-bit stereo PCM).
+        #[arg(short, long)]
+        out: PathBuf,
+
+        /// Sample rate in Hz.
+        #[arg(short, long, default_value_t = 48000)]
+        sample_rate: u32,
+
+        /// Seconds of release tail rendered after the last note ends.
+        #[arg(long, default_value_t = 1.5)]
+        tail: f64,
+    },
     /// List available audio output devices.
     Devices,
     /// List available MIDI input ports.

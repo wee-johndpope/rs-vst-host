@@ -295,6 +295,13 @@ impl Vst3Instance {
                 (comp_vtbl.activateBus)(component, K_AUDIO, K_INPUT, 0, 1);
             }
             (comp_vtbl.activateBus)(component, K_AUDIO, K_OUTPUT, 0, 1);
+
+            // Activate event (MIDI) input buses. Instruments like Ample
+            // Guitar ignore note events unless their event bus is active.
+            let event_ins = (comp_vtbl.getBusCount)(component, K_EVENT, K_INPUT);
+            for bus in 0..event_ins {
+                (comp_vtbl.activateBus)(component, K_EVENT, K_INPUT, bus, 1);
+            }
         });
 
         match result {
